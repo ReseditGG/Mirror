@@ -70,6 +70,10 @@ Preset:
     value: 0
     objectReference: {fileID: 0}
   - target: {fileID: 0}
+    propertyPath: coordinateSpace
+    value: 0
+    objectReference: {fileID: 0}
+  - target: {fileID: 0}
     propertyPath: sendIntervalMultiplier
     value: 1
     objectReference: {fileID: 0}

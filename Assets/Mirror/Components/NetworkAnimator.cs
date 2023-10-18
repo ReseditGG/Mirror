@@ -75,6 +75,22 @@ namespace Mirror
         {
             // store the animator parameters in a variable - the "Animator.parameters" getter allocates
             // a new parameter array every time it is accessed so we should avoid doing it in a loop
+            // parameters = animator.parameters
+            //     .Where(par => !animator.IsParameterControlledByCurve(par.nameHash))
+            //     .ToArray();
+            // lastIntParameters = new int[parameters.Length];
+            // lastFloatParameters = new float[parameters.Length];
+            // lastBoolParameters = new bool[parameters.Length];
+            //
+            // animationHash = new int[animator.layerCount];
+            // transitionHash = new int[animator.layerCount];
+            // layerWeight = new float[animator.layerCount];
+        }
+
+        public void Rebuild()
+        {
+            // store the animator parameters in a variable - the "Animator.parameters" getter allocates
+            // a new parameter array every time it is accessed so we should avoid doing it in a loop
             parameters = animator.parameters
                 .Where(par => !animator.IsParameterControlledByCurve(par.nameHash))
                 .ToArray();
@@ -86,7 +102,6 @@ namespace Mirror
             transitionHash = new int[animator.layerCount];
             layerWeight = new float[animator.layerCount];
         }
-
         void FixedUpdate()
         {
             if (!SendMessagesAllowed)
