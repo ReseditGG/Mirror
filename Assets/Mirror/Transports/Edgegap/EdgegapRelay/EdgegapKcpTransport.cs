@@ -87,7 +87,7 @@ namespace Edgegap
             EdgegapKcpClient client = (EdgegapKcpClient)this.client;
             client.userId = userId;
             client.sessionId = sessionId;
-            client.state = ConnectionState.Checking; // reset from last time
+            client.connectionState = ConnectionState.Checking; // reset from last time
             client.Connect(relayAddress, relayGameClientPort);
         }
         public override void ClientConnect(Uri uri)
@@ -137,7 +137,7 @@ namespace Edgegap
                 EdgegapKcpClient client = (EdgegapKcpClient)this.client;
                 GUILayout.BeginHorizontal();
                 GUILayout.Label("State:");
-                GUILayout.Label(client.state.ToString());
+                GUILayout.Label(client.connectionState.ToString());
                 GUILayout.EndHorizontal();
             }
 
@@ -146,6 +146,7 @@ namespace Edgegap
 
         // base OnGUI only shows in editor & development builds.
         // here we always show it because we need the sessionid & userid buttons.
+#pragma warning disable CS0109
         new void OnGUI()
         {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -156,5 +157,6 @@ namespace Edgegap
 
         public override string ToString() => "Edgegap Kcp Transport";
     }
+#pragma warning restore CS0109
 }
 //#endif MIRROR <- commented out because MIRROR isn't defined on first import yet

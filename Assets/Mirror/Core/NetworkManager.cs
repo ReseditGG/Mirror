@@ -41,20 +41,6 @@ namespace Mirror
         [FormerlySerializedAs("serverTickRate")]
         public int sendRate = 60;
 
-        // Deprecated 2022-10-31
-        [Obsolete("NetworkManager.serverTickRate was renamed to sendRate because that's what it configures for both server & client now.")]
-        public int serverTickRate => sendRate;
-
-        // tick rate is in Hz.
-        // convert to interval in seconds for convenience where needed.
-        //
-        // send interval is 1 / sendRate.
-        // but for tests we need a way to set it to exactly 0.
-        // 1 / int.max would not be exactly 0, so handel that manually.
-        // Deprecated 2022-10-06
-        [Obsolete("NetworkManager.serverTickInterval was moved to NetworkServer.tickInterval for consistency.")]
-        public float serverTickInterval => NetworkServer.tickInterval;
-
         // client send rate follows server send rate to avoid errors for now
         /// <summary>Client Update frequency, per second. Use around 60Hz for fast paced games like Counter-Strike to minimize latency. Use around 30Hz for games like WoW to minimize computations. Use around 1-10Hz for slow paced games like EVE.</summary>
         // [Tooltip("Client broadcasts 'sendRate' times per second. Use around 60Hz for fast paced games like Counter-Strike to minimize latency. Use around 30Hz for games like WoW to minimize computations. Use around 1-10Hz for slow paced games like EVE.")]
@@ -282,21 +268,6 @@ namespace Mirror
             }
         }
 
-        // users can overwrite this to run their own connection quality estimation.
-        protected virtual void CalculateConnectionQuality()
-        {
-            // NetworkClient.connectionQuality = ConnectionQualityHeuristics.Pragmatic(NetworkClient.initialBufferTime, NetworkClient.bufferTime);
-            NetworkClient.connectionQuality = ConnectionQualityHeuristics.Simple(NetworkTime.rtt, NetworkTime.rttVariance);
-        }
-
-        // users can overwrite this to display connection quality warnings, etc.
-        protected virtual void OnConnectionQualityChanged(ConnectionQuality previous, ConnectionQuality current)
-        {
-            // logging the change is very useful to track down user's lag reports.
-            // we want to include as much detail as possible for debugging.
-            Debug.Log($"[Mirror] Connection Quality changed from {previous} to {current}:\n  rtt={(NetworkTime.rtt*1000):F1}ms\n  rttVar={(NetworkTime.rttVariance*1000):F1}ms\n  bufferTime={(NetworkClient.bufferTime*1000):F1}ms");
-        }
-
         ////////////////////////////////////////////////////////////////////////
 
         // keep the online scene change check in a separate function.
@@ -305,10 +276,6 @@ namespace Mirror
             !string.IsNullOrWhiteSpace(onlineScene) &&
             !Utils.IsSceneActive(onlineScene) &&
             onlineScene != offlineScene;
-
-        // Deprecated 2022-12-12
-        [Obsolete("NetworkManager.IsSceneActive moved to Utils.IsSceneActive")]
-        public static bool IsSceneActive(string scene) => Utils.IsSceneActive(scene);
 
         // NetworkManager exposes some NetworkServer/Client configuration.
         // we apply it every Update() in order to avoid two sources of truth.
@@ -1417,6 +1384,21 @@ namespace Mirror
 
         /// <summary>Called on clients when disconnected from a server.</summary>
         public virtual void OnClientDisconnect() { }
+
+        /// <summary>Called on client when connection quality is calculated. Override to use your own measurements.</summary>
+        public virtual void CalculateConnectionQuality()
+        {
+            // NetworkClient.connectionQuality = ConnectionQualityHeuristics.Pragmatic(NetworkClient.initialBufferTime, NetworkClient.bufferTime);
+            NetworkClient.connectionQuality = ConnectionQualityHeuristics.Simple(NetworkTime.rtt, NetworkTime.rttVariance);
+        }
+
+        /// <summary>Called on client when connection quality changes. Override to show your own warnings or UI visuals.</summary>
+        public virtual void OnConnectionQualityChanged(ConnectionQuality previous, ConnectionQuality current)
+        {
+            // logging the change is very useful to track down user's lag reports.
+            // we want to include as much detail as possible for debugging.
+            Debug.Log($"[Mirror] Connection Quality changed from {previous} to {current}:\n  rtt={(NetworkTime.rtt * 1000):F1}ms\n  rttVar={(NetworkTime.rttVariance * 1000):F1}ms\n  bufferTime={(NetworkClient.bufferTime * 1000):F1}ms");
+        }
 
         /// <summary>Called on client when transport raises an exception.</summary>
         public virtual void OnClientError(TransportError error, string reason) { }
