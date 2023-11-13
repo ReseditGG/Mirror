@@ -9,6 +9,9 @@ using Newtonsoft.Json;
 using System.Net;
 using System.Text;
 using System;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using IO.Swagger.Model;
@@ -19,14 +22,20 @@ namespace Edgegap
 {
     public class EdgegapWindow : EditorWindow
     {
-        static readonly HttpClient _httpClient = new HttpClient();
+        // MIRROR CHANGE: create HTTPClient in-place to avoid InvalidOperationExceptions when reusing
+        // static readonly HttpClient _httpClient = new HttpClient();
+        // END MIRROR CHANGE
 
         const string EditorDataSerializationName = "EdgegapSerializationData";
         const int ServerStatusCronjobIntervalMs = 10000; // Interval at which the server status is updated
 
-        // MIRROR CHANGE: specify stylesheet paths in one place
-        // TODO DON'T HARDCODE
-        public const string StylesheetPath = "Assets/Mirror/Hosting/Edgegap/Editor";
+        // MIRROR CHANGE
+        // get the path of this .cs file so we don't need to hardcode paths to
+        // the .uxml and .uss files:
+        // https://forum.unity.com/threads/too-many-hard-coded-paths-in-the-templates-and-documentation.728138/
+        // this way users can move this folder without breaking UIToolkit paths.
+        internal string StylesheetPath =>
+            Path.GetDirectoryName(AssetDatabase.GetAssetPath(MonoScript.FromScriptableObject(this)));
         // END MIRROR CHANGE
 
         readonly System.Timers.Timer _updateServerStatusCronjob = new System.Timers.Timer(ServerStatusCronjobIntervalMs);
@@ -65,6 +74,10 @@ namespace Edgegap
         Label _connectionStatusLabel;
         VisualElement _serverDataContainer;
 
+        // server data manager
+        StyleSheet _serverDataStylesheet;
+        List<VisualElement> _serverDataContainers = new List<VisualElement>();
+
         [MenuItem("Edgegap/Edgegap Hosting")] // MIRROR CHANGE
         public static void ShowEdgegapToolWindow()
         {
@@ -78,6 +91,7 @@ namespace Edgegap
             // BEGIN MIRROR CHANGE
             _visualTree = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>($"{StylesheetPath}/EdgegapWindow.uxml");
             StyleSheet styleSheet = AssetDatabase.LoadAssetAtPath<StyleSheet>($"{StylesheetPath}/EdgegapWindow.uss");
+            _serverDataStylesheet = AssetDatabase.LoadAssetAtPath<StyleSheet>($"{StylesheetPath}/EdgegapServerData.uss");
             // END MIRROR CHANGE
             rootVisualElement.styleSheets.Add(styleSheet);
 
@@ -136,7 +150,7 @@ namespace Edgegap
         {
             SyncObjectWithForm();
             SaveToolData();
-            EdgegapServerDataManager.DeregisterServerDataContainer(_serverDataContainer);
+            DeregisterServerDataContainer(_serverDataContainer);
         }
 
         /// <summary>
@@ -165,8 +179,8 @@ namespace Edgegap
             _serverDataContainer = rootVisualElement.Q<VisualElement>("serverDataContainer");
 
             // Load initial server data UI element and register for updates.
-            VisualElement serverDataElement = EdgegapServerDataManager.GetServerDataVisualTree();
-            EdgegapServerDataManager.RegisterServerDataContainer(serverDataElement);
+            VisualElement serverDataElement = GetServerDataVisualTree();
+            RegisterServerDataContainer(serverDataElement);
             _serverDataContainer.Clear();
             _serverDataContainer.Add(serverDataElement);
 
@@ -209,7 +223,7 @@ namespace Edgegap
             // }
 
             // link to the easiest documentation
-            UnityEngine.Application.OpenURL("https://mirror-networking.gitbook.io/docs/hosting/edgegap-hosting-plugin-guide");
+            Application.OpenURL("https://mirror-networking.gitbook.io/docs/hosting/edgegap-hosting-plugin-guide");
             // END MIRROR CHANGE
         }
 
@@ -241,6 +255,18 @@ namespace Edgegap
             }
         }
 
+        // MIRROR CHANGE: create HTTPClient in-place to avoid InvalidOperationExceptions when reusing
+        HttpClient CreateHttpClient()
+        {
+            HttpClient httpClient = new HttpClient();
+            httpClient.BaseAddress = new Uri(_apiEnvironment.GetApiUrl());
+            httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            string token = _apiKeyInput.value.Substring(6);
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("token", token);
+            return httpClient;
+        }
+        // END MIRROR CHANGE
+
         async void Connect(
             ApiEnvironment selectedApiEnvironment,
             string selectedAppName,
@@ -250,29 +276,10 @@ namespace Edgegap
         {
             SetToolUIState(ToolState.Connecting);
 
-
-            // MIRROR CHANGE ///////////////////////////////////////////////////
-            // the old code throws an exception when trying to connect again after disconnecting:
-            // "InvalidOperationException: This instance has already started one or more requests. Properties can only be modified before sending the first request."
-            //   _httpClient.BaseAddress = new Uri(selectedApiEnvironment.GetApiUrl());
-            //   string path = $"/v1/app/{selectedAppName}/version/{selectedAppVersionName}";
-            //   _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            //   _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("token", selectedApiTokenValue);
-            //   HttpResponseMessage response = await _httpClient.GetAsync(path);
-            //
-            // solution: https://stackoverflow.com/questions/51478525/httpclient-this-instance-has-already-started-one-or-more-requests-properties-ca
-            // "Rather than setting DefaultRequestHeaders, set the headers on each HttpRequestMessage you are sending."
-
-            // Create the request message
-            string baseUrl = selectedApiEnvironment.GetApiUrl();
-            string path = $"/v1/app/{selectedAppName}/version/{selectedAppVersionName}";
-            Uri fullUrl = new Uri(new Uri(baseUrl), path);
-            HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, fullUrl);
-            request.Headers.Accept.Clear();
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            request.Headers.Authorization = new AuthenticationHeaderValue("token", selectedApiTokenValue);
-            HttpResponseMessage response = await _httpClient.SendAsync(request);
-            // END MIRROR CHANGE ///////////////////////////////////////////////
+            // Make HTTP request
+            HttpClient _httpClient = CreateHttpClient(); // MIRROR CHANGE: create HTTPClient in-place to avoid InvalidOperationExceptions when reusing
+            string path = $"/v1/app/{selectedAppName}/version/{selectedAppVersionName}"; // MIRROR CHANGE: use selectedAppName and selectedAppVersionName instead of _appName & _appVersionName
+            HttpResponseMessage response = await _httpClient.GetAsync(path);
 
             if (response.IsSuccessStatusCode)
             {
@@ -321,10 +328,12 @@ namespace Edgegap
 
         float ProgressCounter = 0;
 
-        void ShowBuildWorkInProgress(string status)
+        // MIRROR CHANGE: added title parameter for more detailed progress while waiting
+        void ShowBuildWorkInProgress(string title, string status)
         {
-            EditorUtility.DisplayProgressBar("Build and push progress", status, ProgressCounter++ / 50);
+            EditorUtility.DisplayProgressBar(title, status, ProgressCounter++ / 50);
         }
+        // END MIRROR CHANGE
 
         async void BuildAndPushServer()
         {
@@ -355,7 +364,6 @@ namespace Edgegap
                     onError($"Linux Build Support is missing.\n\nPlease open Unity Hub -> Installs -> Unity {Application.unityVersion} -> Add Modules -> Linux Build Support (IL2CPP & Mono & Dedicated Server) -> Install\n\nAfterwards restart Unity!");
                     return;
                 }
-
                 // END MIRROR CHANGE
 
                 // create server build
@@ -365,7 +373,6 @@ namespace Edgegap
                     onError("Edgegap build failed, please check the Unity console logs.");
                     return;
                 }
-
 
                 string registry = _containerRegistry;
                 string imageName = _containerImageRepo;
@@ -378,12 +385,12 @@ namespace Edgegap
                 }
 
                 // create docker image
-                await EdgegapBuildUtils.RunCommand_DockerBuild(registry, imageName, tag, ShowBuildWorkInProgress);
+                await EdgegapBuildUtils.RunCommand_DockerBuild(registry, imageName, tag, status => ShowBuildWorkInProgress("Building Docker Image", status));
 
                 SetToolUIState(ToolState.Pushing);
 
                 // push docker image
-                (bool result, string error) = await EdgegapBuildUtils.RunCommand_DockerPush(registry, imageName, tag, ShowBuildWorkInProgress);
+                (bool result, string error) = await EdgegapBuildUtils.RunCommand_DockerPush(registry, imageName, tag, status => ShowBuildWorkInProgress("Uploading Docker Image (this may take a while)", status));
                 if (!result)
                 {
                     // catch common issues with detailed solutions
@@ -412,22 +419,25 @@ namespace Edgegap
                 }
 
                 // update edgegap server settings for new tag
-                ShowBuildWorkInProgress("Updating server info on Edgegap");
+                ShowBuildWorkInProgress("Build and Push", "Updating server info on Edgegap");
                 await UpdateAppTagOnEdgegap(tag);
 
                 // cleanup
                 _containerImageTag = tag;
                 SyncFormWithObject();
-                EditorUtility.ClearProgressBar();
                 SetToolUIState(ToolState.Connected);
 
                 Debug.Log("Server built and pushed successfully");
             }
             catch (Exception ex)
             {
-                EditorUtility.ClearProgressBar();
                 Debug.LogError(ex);
                 onError($"Edgegap build and push failed with Error: {ex}");
+            }
+            finally
+            {
+                // MIRROR CHANGE: always clear otherwise it gets stuck there forever!
+                EditorUtility.ClearProgressBar();
             }
         }
 
@@ -441,9 +451,9 @@ namespace Edgegap
             StringContent patchData = new StringContent(json, Encoding.UTF8, "application/json");
 
             // Make HTTP request
+            HttpClient _httpClient = CreateHttpClient(); // MIRROR CHANGE: create HTTPClient in-place to avoid InvalidOperationExceptions when reusing
             HttpRequestMessage request = new HttpRequestMessage(new HttpMethod("PATCH"), path);
             request.Content = patchData;
-
             HttpResponseMessage response = await _httpClient.SendAsync(request);
             string content = await response.Content.ReadAsStringAsync();
 
@@ -465,6 +475,7 @@ namespace Edgegap
             StringContent postData = new StringContent(json, Encoding.UTF8, "application/json");
 
             // Make HTTP request
+            HttpClient _httpClient = CreateHttpClient(); // MIRROR CHANGE: create HTTPClient in-place to avoid InvalidOperationExceptions when reusing
             HttpResponseMessage response = await _httpClient.PostAsync(path, postData);
             string content = await response.Content.ReadAsStringAsync();
 
@@ -490,6 +501,7 @@ namespace Edgegap
             string path = $"/v1/stop/{_deploymentRequestId}";
 
             // Make HTTP request
+            HttpClient _httpClient = CreateHttpClient(); // MIRROR CHANGE: create HTTPClient in-place to avoid InvalidOperationExceptions when reusing
             HttpResponseMessage response = await _httpClient.DeleteAsync(path);
 
             if (response.IsSuccessStatusCode)
@@ -524,7 +536,7 @@ namespace Edgegap
 
             if (serverStatus == ServerStatus.Terminated)
             {
-                EdgegapServerDataManager.SetServerData(null, _apiEnvironment);
+                SetServerData(null, _apiEnvironment);
 
                 if (_updateServerStatusCronjob.Enabled)
                 {
@@ -536,7 +548,7 @@ namespace Edgegap
             }
             else
             {
-                EdgegapServerDataManager.SetServerData(serverStatusResponse, _apiEnvironment);
+                SetServerData(serverStatusResponse, _apiEnvironment);
 
                 if (serverStatus == ServerStatus.Ready || serverStatus == ServerStatus.Error)
                 {
@@ -556,6 +568,7 @@ namespace Edgegap
             string path = $"/v1/status/{_deploymentRequestId}";
 
             // Make HTTP request
+            HttpClient _httpClient = CreateHttpClient(); // MIRROR CHANGE: create HTTPClient in-place to avoid InvalidOperationExceptions when reusing
             HttpResponseMessage response = await _httpClient.GetAsync(path);
 
             // Parse response
@@ -702,6 +715,218 @@ namespace Edgegap
             }
         }
 
+        // server data manager /////////////////////////////////////////////////
+        public void RegisterServerDataContainer(VisualElement serverDataContainer)
+        {
+            _serverDataContainers.Add(serverDataContainer);
+        }
+
+        public void DeregisterServerDataContainer(VisualElement serverDataContainer)
+        {
+            _serverDataContainers.Remove(serverDataContainer);
+        }
+
+        public void SetServerData(Status serverData, ApiEnvironment apiEnvironment)
+        {
+            EdgegapServerDataManager._serverData = serverData;
+            RefreshServerDataContainers();
+        }
+
+        public Label GetHeader(string text)
+        {
+            Label header = new Label(text);
+            header.AddToClassList("label__header");
+
+            return header;
+        }
+
+        public VisualElement GetHeaderRow()
+        {
+            VisualElement row = new VisualElement();
+            row.AddToClassList("row__port-table");
+            row.AddToClassList("label__header");
+
+            row.Add(new Label("Name"));
+            row.Add(new Label("External"));
+            row.Add(new Label("Internal"));
+            row.Add(new Label("Protocol"));
+            row.Add(new Label("Link"));
+
+            return row;
+        }
+
+        public VisualElement GetRowFromPortResponse(PortMapping port)
+        {
+            VisualElement row = new VisualElement();
+            row.AddToClassList("row__port-table");
+            row.AddToClassList("focusable");
+
+
+            row.Add(new Label(port.Name));
+            row.Add(new Label(port.External.ToString()));
+            row.Add(new Label(port.Internal.ToString()));
+            row.Add(new Label(port.Protocol));
+            row.Add(GetCopyButton("Copy", port.Link));
+
+            return row;
+        }
+
+        public Button GetCopyButton(string btnText, string copiedText)
+        {
+            Button copyBtn = new Button();
+            copyBtn.text = btnText;
+            copyBtn.clickable.clicked += () => GUIUtility.systemCopyBuffer = copiedText;
+
+            return copyBtn;
+        }
+
+        public Button GetLinkButton(string btnText, string targetUrl)
+        {
+            Button copyBtn = new Button();
+            copyBtn.text = btnText;
+            copyBtn.clickable.clicked += () => UnityEngine.Application.OpenURL(targetUrl);
+
+            return copyBtn;
+        }
+        public Label GetInfoText(string innerText)
+        {
+            Label infoText = new Label(innerText);
+            infoText.AddToClassList("label__info-text");
+
+            return infoText;
+        }
+
+        VisualElement GetStatusSection()
+        {
+            ServerStatus serverStatus = EdgegapServerDataManager._serverData.GetServerStatus();
+            string dashboardUrl = _apiEnvironment.GetDashboardUrl();
+            string requestId = EdgegapServerDataManager._serverData.RequestId;
+            string deploymentDashboardUrl = "";
+
+            if (!string.IsNullOrEmpty(requestId) && !string.IsNullOrEmpty(dashboardUrl))
+            {
+                deploymentDashboardUrl = $"{dashboardUrl}/arbitrium/deployment/read/{requestId}/";
+            }
+
+            VisualElement container = new VisualElement();
+            container.AddToClassList("container");
+
+            container.Add(GetHeader("Server Status"));
+
+            VisualElement row = new VisualElement();
+            row.AddToClassList("row__status");
+
+            // Status pill
+            Label statusLabel = new Label(serverStatus.GetLabelText());
+            statusLabel.AddToClassList(serverStatus.GetStatusBgClass());
+            statusLabel.AddToClassList("label__status");
+            row.Add(statusLabel);
+
+            // Link to dashboard
+            if (!string.IsNullOrEmpty(deploymentDashboardUrl))
+            {
+                row.Add(GetLinkButton("See in the dashboard", deploymentDashboardUrl));
+            }
+            else
+            {
+                row.Add(new Label("Could not resolve link to this deployment"));
+            }
+
+            container.Add(row);
+
+            return container;
+        }
+
+        VisualElement GetDnsSection()
+        {
+            string serverDns = EdgegapServerDataManager._serverData.Fqdn;
+
+            VisualElement container = new VisualElement();
+            container.AddToClassList("container");
+
+            container.Add(GetHeader("Server DNS"));
+
+            VisualElement row = new VisualElement();
+            row.AddToClassList("row__dns");
+            row.AddToClassList("focusable");
+
+            row.Add(new Label(serverDns));
+            row.Add(GetCopyButton("Copy", serverDns));
+
+            container.Add(row);
+
+            return container;
+        }
+
+        VisualElement GetPortsSection()
+        {
+            List<PortMapping> serverPorts = EdgegapServerDataManager._serverData.Ports.Values.ToList();
+
+            VisualElement container = new VisualElement();
+            container.AddToClassList("container");
+
+            container.Add(GetHeader("Server Ports"));
+            container.Add(GetHeaderRow());
+
+            VisualElement portList = new VisualElement();
+
+            if (serverPorts.Count > 0)
+            {
+                foreach (PortMapping port in serverPorts)
+                {
+                    portList.Add(GetRowFromPortResponse(port));
+                }
+            }
+            else
+            {
+                portList.Add(new Label("No port configured for this app version."));
+            }
+
+            container.Add(portList);
+
+            return container;
+        }
+
+        public VisualElement GetServerDataVisualTree()
+        {
+            VisualElement serverDataTree = new VisualElement();
+            serverDataTree.styleSheets.Add(_serverDataStylesheet);
+
+            bool hasServerData = EdgegapServerDataManager._serverData != null;
+            bool isReady = hasServerData && EdgegapServerDataManager._serverData.GetServerStatus().IsOneOf(ServerStatus.Ready, ServerStatus.Error);
+
+            if (hasServerData)
+            {
+                serverDataTree.Add(GetStatusSection());
+
+                if (isReady)
+                {
+                    serverDataTree.Add(GetDnsSection());
+                    serverDataTree.Add(GetPortsSection());
+                }
+                else
+                {
+                    serverDataTree.Add(GetInfoText("Additional information will be displayed when the server is ready."));
+                }
+            }
+            else
+            {
+                serverDataTree.Add(GetInfoText("Server data will be displayed here when a server is running."));
+            }
+
+            return serverDataTree;
+        }
+
+        void RefreshServerDataContainers()
+        {
+            foreach (VisualElement serverDataContainer in _serverDataContainers)
+            {
+                serverDataContainer.Clear();
+                serverDataContainer.Add(GetServerDataVisualTree()); // Cannot reuse a same instance of VisualElement
+            }
+        }
+
+        // save & load /////////////////////////////////////////////////////////
         /// <summary>
         /// Save the tool's serializable data to the EditorPrefs to allow persistence across restarts.
         /// Any field with [SerializeField] will be saved.

@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -16,6 +16,9 @@ namespace Edgegap
 {
     internal static class EdgegapBuildUtils
     {
+        public static bool IsArmCPU() =>
+            RuntimeInformation.ProcessArchitecture == Architecture.Arm ||
+            RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
 
         public static BuildReport BuildServer()
         {
@@ -24,9 +27,13 @@ namespace Edgegap
             {
                 scenes = scenes.ToArray(),
                 target = BuildTarget.StandaloneLinux64,
- #pragma warning disable CS0618 // disable deprecated warning until Edgegap updates this
-                options = BuildOptions.EnableHeadlessMode,
- #pragma warning restore CS0618
+                // MIRROR CHANGE
+#if UNITY_2021_3_OR_NEWER
+                subtarget = (int)StandaloneBuildSubtarget.Server, // dedicated server with UNITY_SERVER define
+#else
+                options = BuildOptions.EnableHeadlessMode, // obsolete and missing UNITY_SERVER define
+#endif
+                // END MIRROR CHANGE
                 locationPathName = "Builds/EdgegapServer/ServerBuild"
             };
 
@@ -71,12 +78,19 @@ namespace Edgegap
         {
             string realErrorMessage = null;
 
+            // ARM -> x86 support:
+            // build commands use 'buildx' on ARM cpus for cross compilation.
+            // otherwise docker builds would not launch when deployed because
+            // Edgegap's infrastructure is on x86. instead the deployment logs
+            // would show an error in a linux .go file with 'not found'.
+            string buildCommand = IsArmCPU() ? "buildx build --platform linux/amd64" : "build";
+
 #if UNITY_EDITOR_WIN
-            await RunCommand("docker.exe", $"build -t {registry}/{imageRepo}:{tag} .", onStatusUpdate,
+            await RunCommand("docker.exe", $"{buildCommand} -t {registry}/{imageRepo}:{tag} .", onStatusUpdate,
 #elif UNITY_EDITOR_OSX
-            await RunCommand("/bin/bash", $"-c \"docker build -t {registry}/{imageRepo}:{tag} .\"", onStatusUpdate,
+            await RunCommand("/bin/bash", $"-c \"docker {buildCommand} -t {registry}/{imageRepo}:{tag} .\"", onStatusUpdate,
 #elif UNITY_EDITOR_LINUX
-            await RunCommand("/bin/bash", $"-c \"docker build -t {registry}/{imageRepo}:{tag} .\"", onStatusUpdate,
+            await RunCommand("/bin/bash", $"-c \"docker {buildCommand} -t {registry}/{imageRepo}:{tag} .\"", onStatusUpdate,
 #endif
                 (msg) =>
                 {
@@ -201,6 +215,7 @@ namespace Edgegap
            // throw new NotImplementedException();
         }
 
+        // -batchmode -nographics remains for Unity 2019/2020 support pre-dedicated server builds
         static string dockerFileText = @"FROM ubuntu:bionic
 
 ARG DEBIAN_FRONTEND=noninteractive
