@@ -4,7 +4,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Mirror.PredictedRigidbody
+namespace Mirror
 {
     struct RigidbodyState : PredictedState
     {
@@ -14,7 +14,6 @@ namespace Mirror.PredictedRigidbody
         // this way we can apply deltas on top of corrected positions to get the corrected final position.
         public Vector3    positionDelta; // delta to get from last to this position
         public Vector3    position;
-
 
         public Quaternion rotation; // TODO delta rotation?
 
@@ -54,14 +53,21 @@ namespace Mirror.PredictedRigidbody
         }
     }
 
+    public enum CorrectionMode
+    {
+        Set,               // rigidbody.position/rotation = ...
+        Move,              // rigidbody.MovePosition/Rotation
+    }
+
+    [Obsolete("Prediction is under development, do not use this yet.")]
     [RequireComponent(typeof(Rigidbody))]
     public class PredictedRigidbody : NetworkBehaviour
     {
         Rigidbody rb;
         Vector3 lastPosition;
 
-        [Tooltip("Broadcast changes if position changed by more than ... meters.")]
-        public float positionSensitivity = 0.01f;
+        // [Tooltip("Broadcast changes if position changed by more than ... meters.")]
+        // public float positionSensitivity = 0.01f;
 
         // client keeps state history for correction & reconciliation
         [Header("State History")]
@@ -76,15 +82,89 @@ namespace Mirror.PredictedRigidbody
         public bool oneFrameAhead = true;
 
         [Header("Smoothing")]
-        public bool smoothCorrection = true;
+        [Tooltip("Configure how to apply the corrected state.")]
+        public CorrectionMode correctionMode = CorrectionMode.Move;
+
+        [Header("Visual Interpolation")]
+        [Tooltip("After creating the visual interpolation object, keep showing the original Rigidbody with a ghost (transparent) material for debugging.")]
+        public bool showGhost = true;
+
+        [Tooltip("After creating the visual interpolation object, replace this object's renderer materials with the ghost (ideally transparent) material.")]
+        public Material ghostMaterial;
+
+        [Tooltip("How fast to interpolate to the target position, relative to how far we are away from it.\nHigher value will be more jitter but sharper moves, lower value will be less jitter but a little too smooth / rounded moves.")]
+        public float interpolationSpeed = 15; // 10 is a little too low for billiards at least
+
+        [Tooltip("Teleport if we are further than 'multiplier x collider size' behind.")]
+        public float teleportDistanceMultiplier = 10;
 
         [Header("Debugging")]
         public float lineTime = 10;
+
+        // visually interpolated GameObject copy for smoothing
+        protected GameObject visualCopy;
 
         void Awake()
         {
             rb = GetComponent<Rigidbody>();
         }
+
+        // instantiate a visually-only copy of the gameobject to apply smoothing.
+        // on clients, where players are watching.
+        // create & destroy methods are virtual so games with a different
+        // rendering setup / hierarchy can inject their own copying code here.
+        protected virtual void CreateVisualCopy()
+        {
+            // create an empty GameObject with the same name + _Visual
+            visualCopy = new GameObject($"{name}_Visual");
+            visualCopy.transform.position = transform.position;
+            visualCopy.transform.rotation = transform.rotation;
+            visualCopy.transform.localScale = transform.localScale;
+
+            // add the PredictedRigidbodyVisual component
+            PredictedRigidbodyVisual visualRigidbody = visualCopy.AddComponent<PredictedRigidbodyVisual>();
+            visualRigidbody.target = this;
+            visualRigidbody.interpolationSpeed = interpolationSpeed;
+            visualRigidbody.teleportDistanceMultiplier = teleportDistanceMultiplier;
+
+            // copy the rendering components
+            if (GetComponent<MeshRenderer>() != null)
+            {
+                MeshFilter meshFilter = visualCopy.AddComponent<MeshFilter>();
+                meshFilter.mesh = GetComponent<MeshFilter>().mesh;
+
+                MeshRenderer meshRenderer = visualCopy.AddComponent<MeshRenderer>();
+                meshRenderer.material = GetComponent<MeshRenderer>().material;
+            }
+            // if we didn't find a renderer, show a warning
+            else Debug.LogWarning($"PredictedRigidbody: {name} found no renderer to copy onto the visual object. If you are using a custom setup, please overwrite PredictedRigidbody.CreateVisualCopy().");
+
+            // replace this renderer's materials with the ghost (if enabled)
+            foreach (Renderer rend in GetComponentsInChildren<Renderer>())
+            {
+                if (showGhost)
+                {
+                    rend.material = ghostMaterial;
+                }
+                else
+                {
+                    rend.enabled = false;
+                }
+
+            }
+        }
+
+        protected virtual void DestroyVisualCopy()
+        {
+            if (visualCopy != null) Destroy(visualCopy);
+        }
+
+        // creater visual copy only on clients, where players are watching.
+        public override void OnStartClient() => CreateVisualCopy();
+
+        // destroy visual copy only in OnStopClient().
+        // OnDestroy() wouldn't be called for scene objects that are only disabled instead of destroyed.
+        public override void OnStopClient() => DestroyVisualCopy();
 
         void UpdateServer()
         {
@@ -117,12 +197,12 @@ namespace Mirror.PredictedRigidbody
         {
             // Rigidbody .position teleports, while .MovePosition interpolates
             // TODO is this a good idea? what about next capture while it's interpolating?
-            if (smoothCorrection)
+            if (correctionMode == CorrectionMode.Move)
             {
                 rb.MovePosition(position);
                 rb.MoveRotation(rotation);
             }
-            else
+            else if (correctionMode == CorrectionMode.Set)
             {
                 rb.position = position;
                 rb.rotation = rotation;
@@ -188,6 +268,11 @@ namespace Mirror.PredictedRigidbody
 
             // insert the corrected state and adjust 'after.delta' to the inserted.
             Prediction.InsertCorrection(stateHistory, stateHistoryLimit, corrected, before, after);
+
+            // show the received correction position + velocity for debugging.
+            // helps to compare with the interpolated/applied correction locally.
+            // TODO don't hardcode length?
+            Debug.DrawLine(corrected.position, corrected.position + corrected.velocity * 0.1f, Color.white, lineTime);
 
             // now go through the history:
             // 1. skip all states before the inserted / corrected entry
